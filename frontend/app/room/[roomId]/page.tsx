@@ -14,7 +14,7 @@ export default function RoomPage() {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    socketRef.current = io("http://localhost:5001");
+    socketRef.current = io(`${process.env.NEXT_PUBLIC_API_URL}`);
 
     socketRef.current.on("connect", () => setConnected(true));
     socketRef.current.on("disconnect", () => setConnected(false));
