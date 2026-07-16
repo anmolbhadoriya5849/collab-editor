@@ -9,11 +9,14 @@ import { Button } from "@/components/ui/button";
 import axios from "axios";
 import * as Y from "yjs";
 import type { MonacoBinding } from "y-monaco";
-import { Plus, FileCode, Folder, ChevronDown } from "lucide-react";
-import { bootOS, fileSystem, startDevServer, webcontainerInstance } from "@/components/webContainers/webContainer";
-import { log } from "console";
+import { Plus, FileCode, Folder, ChevronDown, Terminal as TermIcon } from "lucide-react";
+import { bootOS, startDevServer, webcontainerInstance } from "@/components/webContainers/webContainer";
+import { Terminal } from "@xterm/xterm";
+import { setTerminal } from "@/components/webContainers/terminal";
+import "@xterm/xterm/css/xterm.css";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
-// ── LAYMAN'S EXPLANATION: TypeScript definition for our nested items ───────
 interface FileSystemNode {
   name: string;
   path: string;
@@ -21,19 +24,15 @@ interface FileSystemNode {
   children: FileSystemNode[];
 }
 
-// ── LAYMAN'S EXPLANATION: Converts ["/main.ts", "/src/utils/math.ts"] into a nested tree structure ──
 const buildTree = (paths: string[]): FileSystemNode[] => {
   const root: any = {};
-
   paths.forEach((path) => {
     const parts = path.split("/").filter(Boolean);
     let current = root;
     let currentPath = "";
-
     parts.forEach((part, index) => {
       currentPath += "/" + part;
       const isFolder = index < parts.length - 1;
-
       if (!current[part]) {
         current[part] = {
           name: part,
@@ -56,11 +55,9 @@ const buildTree = (paths: string[]): FileSystemNode[] => {
       children: node.isFolder ? formatNode(node.children) : [],
     }));
   };
-
   return formatNode(root);
 };
 
-// ── LAYMAN'S EXPLANATION: A recursive component that renders files and folders ──
 function FileNode({ 
   node, 
   activeFile, 
@@ -137,31 +134,94 @@ export default function RoomPage() {
   const [showInput, setShowInput] = useState(false);
   const [filePath, setFilePath] = useState("");
 
-  const monacoRef = useRef(null);
+  const monacoRef = useRef(null); 
+  const terminalRef = useRef<HTMLDivElement | null>(null);
+  const terminalInstanceRef = useRef<Terminal | null>(null);
+
+  // Structural prompt setup for xterm
+  const prompt = "\r\n\x1b[1;32m@webcontainer \x1b[37m$ ";
+
+  useEffect(() => {
+    if (!terminalRef.current || terminalInstanceRef.current) return;
+
+    const term = new Terminal({
+      fontFamily: 'IBM Plex Mono, Courier New, monospace',
+      fontSize: 13,
+      theme: {
+        background: '#0c0c0d',
+        foreground: '#e8e8e8',
+        cursor: '#7cfc8e'
+      },
+      convertEol: true,                             
+      cursorBlink: true,
+      scrollback: 1000,
+      scrollOnEraseInDisplay: true
+    });
+    
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+
+    terminalInstanceRef.current = term;
+    term.open(terminalRef.current);
+    fitAddon.fit();
+    setTerminal(term);
+
+    const resizeObserver = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+
+    resizeObserver.observe(terminalRef.current);
+
+    term.write("\x1b[1;35mWelcome to the Sandbox Workspace Terminal\x1b[37m");
+    term.write(prompt);
+
+    let currentCommand = '';
+
+  
+    const dataListener = term.onData((data) => {
+      const code = data.charCodeAt(0);
+
+      if (code === 13) { // Enter key
+        term.write("\r\n");
+        if (currentCommand.trim() && fileContentsRef.current) {
+          startDevServer(fileContentsRef.current, currentCommand.trim());
+        } else {
+          term.write(prompt);
+        }
+        currentCommand = '';
+      } else if (code === 127) { // Backspace
+        if (currentCommand.length > 0) {
+          currentCommand = currentCommand.slice(0, -1);
+          term.write("\b \b");
+        }
+      } else if (code >= 32 && code <= 126) { // Printable characters
+        currentCommand += data;
+        term.write(data);
+      }
+    });
+
+    return () => {
+      resizeObserver.disconnect();
+      dataListener.dispose();
+      term.dispose();
+      terminalInstanceRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const ydoc = new Y.Doc();
     ydocRef.current = ydoc;
     const fileContents = ydoc.getMap<Y.Text>("fileContents");
     fileContentsRef.current = fileContents;
+    
     async function initializeFileSystem() {
       await bootOS();
     }
     initializeFileSystem();
-    console.log(fileContents.keys());
 
     fileContents.observe(() => {
       const paths = Array.from(fileContents.keys());
       setFileList(paths);
-
-      async function updateFileSystem() {
-        if(!webcontainerInstance){
-          console.log("WebContainer instance is not initialized.");
-          return;
-        }
-        await fileSystem(fileContents);
-      }
-      updateFileSystem();
     });
 
     return () => ydoc.destroy();
@@ -262,14 +322,11 @@ export default function RoomPage() {
 
   const handleCreateNewFile = (rawPath: string) => {
     if (!fileContentsRef.current || !rawPath.trim()) return;
-    
     const newFilePath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
-
     if (fileContentsRef.current.has(newFilePath)) {
       alert("File already exists!");
       return;
     }
-
     fileContentsRef.current.set(newFilePath, new Y.Text());
     setActiveFile(newFilePath);
     setFilePath("");
@@ -287,13 +344,11 @@ export default function RoomPage() {
     router.push("/");
   };
 
-  // Turn our flat files state into a visual tree hierarchy state
   const fileTree = buildTree(fileList);
 
   return (
     <div className="flex h-screen font-['Syne',sans-serif] bg-[#0c0c0d] text-[#e8e8e8] overflow-hidden">
       
-      {/* ── SIDEBAR (Visual File Explorer Layout) ── */}
       <aside className="w-[260px] flex flex-col border-r border-[#1a1a1e] bg-[#0a0a0b] shrink-0 z-10">
         <div className="h-[52px] flex items-center px-4 border-b border-[#1a1a1e] shrink-0">
           <span className="font-['IBM_Plex_Mono',monospace] text-[12px] text-[#e8e8e8] tracking-[0.08em] font-semibold">
@@ -306,7 +361,6 @@ export default function RoomPage() {
           <button 
             onClick={() => setShowInput(!showInput)}
             className="text-[#888892] hover:text-[#7cfc8e] transition-colors"
-            title="Create New File/Folder Path"
           >
             <Plus className="w-4 h-4" />
           </button>
@@ -333,7 +387,6 @@ export default function RoomPage() {
           </div>
         )}
 
-        {/* ── Rendering the Recursive Tree Component ── */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 flex flex-col gap-0.5">
           {fileTree.map((node) => (
             <FileNode 
@@ -346,19 +399,14 @@ export default function RoomPage() {
         </div>
       </aside>
 
-      {/* ── MAIN EDITOR AREA ── */}
       <main className="flex-1 flex flex-col min-w-0 relative">
         <header className="flex items-center justify-between px-5 h-[52px] border-b border-[#1a1a1e] bg-[#0c0c0d] shrink-0 gap-4">
           <div className="flex items-center gap-4">
-            <button 
-              className="group flex items-center gap-2 bg-[#141416] border border-[#222226] rounded-lg py-[5px] px-[10px] cursor-pointer transition-colors duration-150 hover:border-[#2e2e36] hover:bg-[#1a1a1e]" 
-              onClick={copyRoomId} 
-              title="Click to copy room ID"
-            >
+            <button className="group flex items-center gap-2 bg-[#141416] border border-[#222226] rounded-lg py-[5px] px-[10px] cursor-pointer transition-colors" onClick={copyRoomId}>
               <span className="font-['IBM_Plex_Mono',monospace] text-[13px] text-[#c0c0cc] tracking-[0.04em]">
                 {roomId}
               </span>
-              <span className={`text-[11px] transition-colors duration-150 ${copied ? "text-[#7cfc8e]" : "text-[#3e3e4a] group-hover:text-[#7cfc8e]"}`}>
+              <span className={`text-[11px] ${copied ? "text-[#7cfc8e]" : "text-[#3e3e4a]"}`}>
                 {copied ? "✓" : "⎘"}
               </span>
             </button>
@@ -371,19 +419,21 @@ export default function RoomPage() {
               </span>
             )}
             <div className="flex items-center gap-[6px] font-['IBM_Plex_Mono',monospace] text-[11px] text-[#4a4a54] tracking-[0.06em]">
-              <span className={`w-[6px] h-[6px] rounded-full transition-all duration-300 ${connected ? "bg-[#7cfc8e] shadow-[0_0_6px_#7cfc8e60]" : "bg-[#2e2e36]"}`} />
+              <span className={`w-[6px] h-[6px] rounded-full ${connected ? "bg-[#7cfc8e]" : "bg-[#2e2e36]"}`} />
               {connected ? "connected" : "connecting"}
             </div>
             <span className="w-[1px] h-[18px] bg-[#1e1e24]" />
             <Button
-            onClick={() => {
-              if(!fileContentsRef.current) return;
-              startDevServer(fileContentsRef.current);
-            }}
-            variant="default" size="sm" className="hover:text-green-600 text-green-300">
+              onClick={() => {
+                if(!fileContentsRef.current) return;
+                // Executing "node activeFileName" directly when clicking run
+                startDevServer(fileContentsRef.current, `node ${activeFile.replace(/^\//, '')}`);
+              }}
+              variant="default" size="sm" className="bg-[#141416] border border-[#222226] text-[#7cfc8e] hover:bg-[#1a1a1e]"
+            >
               Run
             </Button>
-            <Button variant="outline" size="sm" onClick={() => router.push("/")} className="bg-transparent border-[#222226] text-[#c0c0cc] hover:text-white hover:bg-[#1a1a1e]">
+            <Button variant="outline" size="sm" onClick={() => router.push("/")} className="bg-transparent border-[#222226] text-[#c0c0cc] hover:bg-[#1a1a1e]">
               Home
             </Button>
             <Button variant="destructive" size="sm" onClick={() => setShowLeaveModal(true)} className="bg-[#3a1010] text-[#ff7070] hover:bg-[#501010]">
@@ -392,48 +442,47 @@ export default function RoomPage() {
           </div>
         </header>
 
-        <div className="flex-1 relative bg-[#0f0f10]">
-          {!connected && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-[#1a1010] border border-[#3a1a1a] text-[#ff7070] font-['IBM_Plex_Mono',monospace] text-[12px] px-4 py-2 rounded-lg tracking-[0.04em] z-10 shadow-lg">
-              reconnecting…
+        {/* Dynamic workspace sizing */}
+        <div className="flex-1 flex flex-col min-h-0 bg-[#0f0f10]">
+          <div className="flex-1 min-h-0 relative">
+            <div className="flex items-center px-4 h-[35px] gap-2 border-b border-[#141416] bg-[#0c0c0d]">
+              <span className="font-['IBM_Plex_Mono',monospace] text-[12px] text-[#7cfc8e] tracking-[0.04em]">
+                {activeFile}
+              </span>
             </div>
-          )}
-
-          <div className="flex items-center px-4 h-[35px] gap-2 border-b border-[#141416] bg-[#0c0c0d] shrink-0">
-            <span className="font-['IBM_Plex_Mono',monospace] text-[12px] text-[#7cfc8e] tracking-[0.04em]">
-              {activeFile}
-            </span>
+            <Editor
+              height="calc(100% - 35px)"
+              language={getLanguage(activeFile)}
+              onMount={handleEditorMount}
+              options={{
+                theme: "vs-dark",
+                fontSize: 14,
+                automaticLayout: true,
+                minimap: { enabled: false },
+                wordWrap: "on",
+              }}
+            />
           </div>
 
-          <Editor
-            height="calc(100% - 35px)"
-            language={getLanguage(activeFile)}
-            onMount={handleEditorMount}
-            options={{
-              theme: "vs-dark",
-              fontSize: 14,
-              lineHeight: 22,
-              automaticLayout: true,
-              minimap: { enabled: true },
-              scrollBeyondLastLine: false,
-              wordWrap: "on",
-              padding: { top: 16, bottom: 16 },
-              tabSize: 2,
-              insertSpaces: true,
-              formatOnPaste: true,
-              formatOnType: true,
-              cursorBlinking: "smooth",
-              smoothScrolling: true,
-              renderWhitespace: "selection",
-            }}
-          />
+{/* Integrated Terminal Element Layout Area */}
+          <div className="h-[220px] bg-[#0c0c0d] border-t border-[#1a1a1e] flex flex-col">
+            <div className="h-8 bg-[#101012] border-b border-[#1a1a1e] px-4 flex items-center gap-2 text-[#888892] shrink-0">
+              <TermIcon className="w-3.5 h-3.5 text-[#7cfc8e]" />
+              <span className="text-[11px] font-['IBM_Plex_Mono',monospace] font-semibold tracking-wider">TERMINAL INTERACTIVE CONSOLE</span>
+            </div>
+            
+            {/* THE FIX: We separate the padding into a relative parent, and make the terminal absolute */}
+            <div className="flex-1 relative px-3 py-2">
+              <div ref={terminalRef} className="absolute inset-0 px-3 py-2 overflow-hidden [&>.xterm]:w-full [&>.xterm]:h-full" />
+            </div>
+          </div>
         </div>
 
-        <footer className="flex items-center justify-between px-4 h-[24px] border-t border-[#141416] bg-[#007acc] shrink-0">
-          <span className="font-['IBM_Plex_Mono',monospace] text-[10px] text-white tracking-[0.06em]">
+        <footer className="flex items-center justify-between px-4 h-[26px] border-t border-[#141416] bg-[#0c0c0d] shrink-0">
+          <span className="font-['IBM_Plex_Mono',monospace] text-[10px] text-[#888892] tracking-[0.06em]">
             collab.code // {peers} online
           </span>
-          <span className="font-['IBM_Plex_Mono',monospace] text-[10px] text-white tracking-[0.06em]">
+          <span className="font-['IBM_Plex_Mono',monospace] text-[10px] text-[#888892] tracking-[0.06em]">
             {getLanguage(activeFile).toUpperCase()}
           </span>
         </footer>
@@ -441,24 +490,12 @@ export default function RoomPage() {
 
       {showLeaveModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex justify-center items-center z-[100]">
-          <div className="bg-[#101012] border border-[#222226] rounded-xl p-6 w-[90%] max-w-[400px] shadow-[0_8px_32px_rgba(0,0,0,0.5)] text-center">
+          <div className="bg-[#101012] border border-[#222226] rounded-xl p-6 w-[90%] max-w-[400px] text-center">
             <h3 className="text-[18px] font-semibold mb-3 text-[#e8e8e8]">Leave Room?</h3>
-            <p className="text-[14px] text-[#888892] mb-6 leading-relaxed">
-              Are you sure you want to go back to the main page? Your connection to this collaborative session will be closed.
-            </p>
+            <p className="text-[14px] text-[#888892] mb-6">Are you sure you want to go back to the main page?</p>
             <div className="flex gap-3 justify-center">
-              <button 
-                className="bg-[#1a1a1e] text-[#c0c0cc] border border-[#2e2e36] py-2.5 px-5 rounded-lg cursor-pointer font-['Syne',sans-serif] font-semibold transition-all duration-200 hover:bg-[#222226] hover:text-[#e8e8e8]"
-                onClick={() => setShowLeaveModal(false)}
-              >
-                Cancel
-              </button>
-              <button 
-                className="bg-[#ff7070] text-[#101012] border-none py-2.5 px-5 rounded-lg cursor-pointer font-['Syne',sans-serif] font-semibold transition-all duration-200 hover:bg-[#ff5050]"
-                onClick={confirmLeaveRoom}
-              >
-                Yes, Leave
-              </button>
+              <button className="bg-[#1a1a1e] text-[#c0c0cc] border border-[#2e2e36] py-2 px-4 rounded-lg" onClick={() => setShowLeaveModal(false)}>Cancel</button>
+              <button className="bg-[#ff7070] text-[#101012] py-2 px-4 rounded-lg font-semibold" onClick={confirmLeaveRoom}>Yes, Leave</button>
             </div>
           </div>
         </div>

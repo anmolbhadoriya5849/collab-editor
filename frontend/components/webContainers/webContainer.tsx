@@ -1,97 +1,99 @@
 import { WebContainer } from '@webcontainer/api';
 import * as Y from "yjs";
+import { getTerminal } from './terminal';
 
 export let webcontainerInstance: WebContainer; 
+let bootPromise: Promise<WebContainer> | null = null; // Tracks the boot progress
 
-async function bootOS() {
-  if (!webcontainerInstance) {
-    webcontainerInstance = await WebContainer.boot();
-    console.log("Node.js OS is successfully running in the browser!");
+export async function bootOS() {
+  // If it's already booting, don't trigger it again. Just wait for the existing promise.
+  if (!bootPromise) {
+    bootPromise = WebContainer.boot();
+  }
+  
+  try {
+    webcontainerInstance = await bootPromise;
+    console.log("Node.js OS successfully initialized in the browser session.");
+    return webcontainerInstance;
+  } catch (error) {
+    console.error("Critical failure booting WebContainer:", error);
+    throw error;
   }
 }
 
-async function fileSystem(fileContents: Y.Map<Y.Text>) {
-    const fileTree : any = {};
+export async function fileSystem(fileContents: Y.Map<Y.Text>) {
+  const fileTree: any = {};
 
-    for(const [keys, value] of fileContents.entries()){
-        const fileName = keys.split("/").filter(Boolean);
-        const length = fileName.length;
-        let current = fileTree;
+  for (const [keys, value] of fileContents.entries()) {
+    const fileName = keys.split("/").filter(Boolean);
+    const length = fileName.length;
+    let current = fileTree;
 
-        fileName.forEach((part, index) => {
-            if(index === length - 1){
-                let content = value.toString();
-                
-                // Node.js crashes if package.json is completely empty.
-                // This forces it to be valid JSON if it's blank.
-                if (part === "package.json") {
-                    try {
-                        JSON.parse(content);
-                    } catch (error) {
+    fileName.forEach((part, index) => {
+      if (index === length - 1) {
+        let content = value.toString();
+        
+        if (part === "package.json") {
+          try {
+            if (!content.trim()) content = "{}";
+            JSON.parse(content);
+          } catch (error) {
+            console.warn(`Invalid JSON formatting inside package.json context: ${error}`);
+            content = "{}";
+          }
+        }
 
-                        console.warn(`Invalid JSON in package.json. Replacing with default content. Error: ${error}`);
-                        content = "{}";
-                    }
-                }
+        current[part] = {
+          file: {
+            contents: content,
+          }
+        };
+      } else {
+        if (!current[part]) {
+          current[part] = {
+            directory: {}
+          };
+        }
+        current = current[part].directory;
+      }
+    });
+  }
 
-                current[part] = {
-                    file: {
-                        contents: content,
-                    }
-                }
-            } else {
-                if(!current[part]){
-                    current[part] = {
-                        directory: {}
-                    }
-                }
-                current = current[part].directory;
-            }
-        });
-    }
-
-    return fileTree;
+  return fileTree;
 }
 
-async function startDevServer(YjsMap : Y.Map<Y.Text>) {
+export async function startDevServer(YjsMap: Y.Map<Y.Text>, fullText: string) {
+  // Check 1: If it's not booted yet, forcefully await it before continuing.
   if (!webcontainerInstance) {
-    console.error("WebContainer has not finished booting up yet!");
-    return;
+    getTerminal().write("\r\n\x1b[1;33mBooting Sandbox Environment... Please wait.\x1b[37m\r\n");
+    await bootOS();
   }
 
   if (!YjsMap) {
-    console.error("No Yjs files found to mount.");
+    getTerminal().write("\r\n\x1b[1;31mError: No files found to execute.\x1b[37m\r\n");
     return;
   }
 
   const fileTree = await fileSystem(YjsMap);
-
-  if (!fileTree) {
-    console.error("Failed to create file system structure.");
-    return;
-  }
-
-  // Mount the safely formatted files
   await webcontainerInstance.mount(fileTree);   
 
-  console.log("Executing node utils.js...");
+  const command = fullText.trim().split(/\s+/);
+  const cmd = command[0];
+  const args = command.slice(1);
 
   try {
-    // Run the file
-    const utilsProcess = await webcontainerInstance.spawn('node', ['utils.js']);
+    const utilsProcess = await webcontainerInstance.spawn(cmd, args);
 
-    // Pipe the output to the browser console
     utilsProcess.output.pipeTo(new WritableStream({
       write(data) {
-          console.log("[WebContainer]:", data);
+        getTerminal().write(data);
       }
     }));
 
     const exitCode = await utilsProcess.exit;
-    console.log(`Script finished with exit code: ${exitCode}`);
+    getTerminal().write(`\r\n\x1b[1;30mProcess finished with exit code: ${exitCode}\x1b[37m\r\n@webcontainer $ `);
   } catch (error) {
-    console.error("Failed to run file:", error);
+    console.error("Failed executing spawned processes:", error);
+    getTerminal().write(`\r\n\x1b[1;31mExecution failure: ${error}\x1b[37m\r\n@webcontainer $ `);
   }
 }
-
-export { bootOS, fileSystem, startDevServer };
