@@ -7,7 +7,6 @@ import prisma from "./lib/prisma.js";
 import "dotenv/config";
 const app = express();
 const server = http.createServer(app);
-console.log("MY DATABASE URL IS:", process.env.DATABASE_URL);
 const io = new Server(server, {
     cors: {
         origin: "http://localhost:3000",
@@ -28,20 +27,23 @@ async function getRoomPeerCount(roomId) {
     return sockets.length;
 }
 io.on("connection", (socket) => {
-    console.log("User connected:", socket.id);
     socket.on("join-room", async (roomId) => {
         socket.join(roomId);
-        console.log(`User ${socket.id} joined room ${roomId}`);
-        // COLD START RESTORATION: If the doc isn't in RAM, check the Database
         if (!roomDocs.has(roomId)) {
             const doc = new Y.Doc();
             try {
                 const dbDocument = await prisma.document.findUnique({
-                    where: { roomId: roomId }
+                    where: { roomId: roomId },
                 });
-                // If we found saved code in the DB, load it into the Y.Doc
                 if (dbDocument && dbDocument.code) {
-                    Y.applyUpdate(doc, dbDocument.code); // Buffer is automatically compatible with Uint8Array
+                    // Existing room — restore full CRDT state from DB
+                    Y.applyUpdate(doc, dbDocument.code);
+                }
+                else {
+                    // Fresh room — seed default files into fileContents map
+                    const fileContents = doc.getMap("fileContents");
+                    fileContents.set("main.ts", new Y.Text());
+                    fileContents.set("package.json", new Y.Text());
                 }
             }
             catch (error) {
@@ -51,7 +53,6 @@ io.on("connection", (socket) => {
         }
         const doc = roomDocs.get(roomId);
         const state = Y.encodeStateAsUpdate(doc);
-        // FIX: Convert raw binary to standard array for the frontend
         socket.emit("document-state", Array.from(state));
         const count = await getRoomPeerCount(roomId);
         io.to(roomId).emit("peer-count", count);
@@ -91,7 +92,11 @@ setInterval(async () => {
             const doc = roomDocs.get(roomId);
             if (!doc)
                 continue;
-            // Get binary data and convert to Buffer
+            // // Get binary data and convert to Buffer
+            //   console.log(
+            //   "SAVING:",
+            //   doc.get("fileContents")
+            // );
             const binaryState = Y.encodeStateAsUpdate(doc);
             const bufferToSave = Buffer.from(binaryState);
             // Upsert into Database (Update if exists, Create if new)
